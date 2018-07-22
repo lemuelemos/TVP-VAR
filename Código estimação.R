@@ -1,4 +1,4 @@
-setwd("/media/lemuel/Externo/Economia/Mestrado/series temporais/Artigo Series/Artigo novo")
+setwd("~/Documentos/TVP-VAR")
 library(BETS)
 library(timeSeries)
 library(zoo)
@@ -6,8 +6,31 @@ library(mFilter)
 library(strucchange)
 library(bvarsv)
 library(seasonal)
+library(readxl)
+library(dplyr)
+library(rbcb)
+library(lubridate)
 
 #Baixando os Dados: Gap, Câmbio e Selic
+CDS_Brazil <- read_excel("CDS_Brazil.xlsx", 
+                         col_types = c("date", "numeric", "numeric")) ### Import CDS
+CDS_Brazil <- na.omit(CDS_Brazil) ### Excluding NA's
+colnames(CDS_Brazil)[1] <- "Dates" ### Setting the first column to Dates name
+EMBI <- read_excel("EMBI.xlsx", col_types = c("date", "numeric", "numeric"))  ### Import EMBI
+EMBI <- na.omit(EMBI) ## Excluding NA's
+colnames(EMBI)[1] <- "Dates" ### Setting the first column to Dates name
+dados <- inner_join(CDS_Brazil,EMBI)
+volatilidade_historica <- read_excel("volatilidade historica.xlsx", 
+                                     col_types = c("date", "numeric", "blank")) ### Import Hist vol
+volatilidade_historica <- na.omit(volatilidade_historica) ## Excluding NA's
+colnames(volatilidade_historica)[1] <- "Dates" ### Setting the first column to Dates name
+dados <- inner_join(dados,volatilidade_historica)
+Volatilidade_Implicita <- read_excel("Volatilidade Implicita.xlsx", 
+                                     col_types = c("date", "numeric", "numeric")) ### Import impli vol
+Volatilidade_Implicita <- na.omit(Volatilidade_Implicita) ## Excluding NA's
+dados <- inner_join(dados,Volatilidade_Implicita)
+
+### Downloadign data
 cdgdata <- read.csv2("Códigos BETS.csv", sep = "\t")
 codes <- as.character(cdgdata$codigo)
 nomes <- as.character(cdgdata$Nome)
@@ -19,7 +42,7 @@ for(i in 1:length(codes)){
 }
 colnames(data) <- nomes[1:ncol(data)]
 
-data <- window(data, start=c(2002,1), end= c(2016,12))
+data <- window(data, start=c(2002,1), end= c(2017,12))
 
 #Definindo as variáveis
 selic <- data[,1]
@@ -33,26 +56,45 @@ prodinddsaz <- saz$series$s11
 prodindhp <- hpfilter(prodinddsaz,freq=14400,type=c("lambda"),drift=FALSE)
 prodindtrend <- prodindhp$trend
 hiato <- ((prodind - prodindtrend)/prodindtrend)*100
+hiato <- log(prodind)-log(prodindtrend)
 
-########################calculando o Desvio##################################
-#calculo da média
-meses <- c("jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez")
-#importar todos
-for(i in 2002:2016){
-  assign(paste0("Desvio",i),read.csv2(print(paste0("Desvio",i,".csv"))))
-}
+####### Dados de Inflação
+indic <- c("IPCA","IGP-DI")
+end_date <- "2018-06-31"
+start_date <- "2002-01-01"
+infla <- get_annual_market_expectations(indic, 
+                                        end_date = end_date, 
+                                        start_date = start_date) ## baixando os dados
 
-#médias mensais
-mdtt <- data.frame(0,0)
-for(i in 2002:2016){
-  for(j in 2:3){
-    for(k in 1:12){
-      mdtt[k,j-1] <- mean(eval(as.symbol(paste0("Desvio",i)))
-                          [grep(meses[k],eval(as.symbol(paste0("Desvio",i)))[,1]),j])
-      assign(paste0("mediam",i),mdtt)
-    }
-  }
-}
+ipca <- infla %>% select(indic,date,reference_year,mean) %>%
+  filter(indic == "IPCA") %>%
+  group_by(year(date),month(date),reference_year) %>%
+  summarise(media = mean(mean)) %>%
+  ungroup() %>%
+  mutate(date = as.yearmon(paste0(`year(date)`,"-", `month(date)`))) %>%
+  select(date,reference_year,media) %>%
+  dplyr::rename(Datas = date,Ano_referencia=reference_year,Media = media)%>%
+  group_by(Datas) %>%
+  filter(Ano_referencia %in% c(year(Datas),year(Datas)+1))
+
+igpmdi <- infla %>% select(indic,date,reference_year,mean) %>%
+  filter(indic == "IGP-DI") %>%
+  group_by(year(date),month(date),reference_year) %>%
+  summarise(media = mean(mean)) %>%
+  ungroup() %>%
+  mutate(date = as.yearmon(paste0(`year(date)`,"-", `month(date)`))) %>%
+  select(date,reference_year,media) %>%
+  dplyr::rename(Datas = date,Ano_referencia=reference_year,Media = media)%>%
+  group_by(Datas) %>%
+  filter(Ano_referencia %in% c(year(Datas),year(Datas)+1))
+
+metas <- read.csv("Metas.csv")
+metas <- metas %>% select(-X)
+metas <- gather(metas)
+datas <- seq(as.Date("2002-01-01"),as.Date("2017-12-01"), by = "month")
+datas <- as.yearmon(datas)
+metas$key <- datas
+colnames(metas) <- c("Data","Meta")
 
 #calculo do desvio da meta
 desviott <- data.frame(1:12,0)
@@ -97,7 +139,7 @@ dpselic <- (selic/lag(selic,-1) - 1)*100
 dpcambio <- (cambio/lag(cambio,-1) - 1)*100
 dphiato <- (hiato/lag(hiato,-1) - 1)*100
 dplDt <- (Dt/lag(Dt,-1) - 1)*100
-variaveis4 <- cbind(dpselic,dpcambio,dphiato,dpDt)
+variaveis4 <- cbind(dpselic,dpcambio,dphiato,dplDt)
 #### estimando o modelo
 set.seed(300)
 bv1 <- bvar.sv.tvp(variaveis1, p = 2, nf = 2, tau = 40)
