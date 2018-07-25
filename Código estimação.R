@@ -10,54 +10,91 @@ library(readxl)
 library(dplyr)
 library(rbcb)
 library(lubridate)
+library(tidyr)
+library(timetk)
 
 #Baixando os Dados: Gap, Câmbio e Selic
 CDS_Brazil <- read_excel("CDS_Brazil.xlsx", 
                          col_types = c("date", "numeric", "numeric")) ### Import CDS
 CDS_Brazil <- na.omit(CDS_Brazil) ### Excluding NA's
-colnames(CDS_Brazil)[1] <- "Dates" ### Setting the first column to Dates name
+colnames(CDS_Brazil)[1] <- "index" ### Setting the first column to Dates name
+CDS_Brazil %>% 
+  group_by(year(index),month(index)) %>% 
+  summarise(CDS5Y = mean(`BRAZIL CDS USD SR 5Y D14 Corp`)) %>% 
+  ungroup() %>% 
+  mutate(index = as.yearmon(paste0(`year(index)`,"-", `month(index)`))) %>%
+  select(index,CDS5Y)-> CDS_Brazil
+
 EMBI <- read_excel("EMBI.xlsx", col_types = c("date", "numeric", "numeric"))  ### Import EMBI
 EMBI <- na.omit(EMBI) ## Excluding NA's
-colnames(EMBI)[1] <- "Dates" ### Setting the first column to Dates name
-dados <- inner_join(CDS_Brazil,EMBI)
+colnames(EMBI)[1] <- "index" ### Setting the first column to Dates name
+EMBI %>% 
+  group_by(year(index),month(index)) %>%
+  summarise(EMBI = mean(`JPEIGLSP Index`)) %>%
+  ungroup() %>% 
+  mutate(index = as.yearmon(paste0(`year(index)`,"-", `month(index)`))) %>%
+  select(index,EMBI)-> EMBI
+
+
 volatilidade_historica <- read_excel("volatilidade historica.xlsx", 
                                      col_types = c("date", "numeric", "blank")) ### Import Hist vol
 volatilidade_historica <- na.omit(volatilidade_historica) ## Excluding NA's
-colnames(volatilidade_historica)[1] <- "Dates" ### Setting the first column to Dates name
-dados <- inner_join(dados,volatilidade_historica)
-Volatilidade_Implicita <- read_excel("Volatilidade Implicita.xlsx", 
+colnames(volatilidade_historica)[1] <- "index" ### Setting the first column to Dates name
+volatilidade_historica %>% 
+  group_by(year(index),month(index)) %>%
+  summarise(VOL30 = mean(`Volatility 30 Day`)) %>%
+  ungroup() %>% 
+  mutate(index = as.yearmon(paste0(`year(index)`,"-", `month(index)`))) %>%
+  select(index,VOL30)-> volatilidade_historica
+
+
+
+volatilidade_implicita <- read_excel("Volatilidade Implicita.xlsx", 
                                      col_types = c("date", "numeric", "numeric")) ### Import impli vol
-Volatilidade_Implicita <- na.omit(Volatilidade_Implicita) ## Excluding NA's
-dados <- inner_join(dados,Volatilidade_Implicita)
+volatilidade_implicita <- na.omit(volatilidade_implicita) ## Excluding NA's
+colnames(volatilidade_implicita)[1] <- "index"
+volatilidade_implicita %>% 
+  group_by(year(index),month(index)) %>%
+  summarise(VOLIMPL1Y = mean(`USDBRLV1Y Curncy`)) %>%
+  ungroup() %>% 
+  mutate(index = as.yearmon(paste0(`year(index)`,"-", `month(index)`))) %>%
+  select(index,VOLIMPL1Y)-> volatilidade_implicita
+
+
 
 ### Downloadign data
 cdgdata <- read.csv2("Códigos BETS.csv", sep = "\t")
 codes <- as.character(cdgdata$codigo)
 nomes <- as.character(cdgdata$Nome)
 tempdata <- 0
-data <- NULL
+data_bets <- NULL
 for(i in 1:length(codes)){
   tempdata <- BETSget(codes[i])
-  data <-  cbind(data,tempdata)
+  data_bets <-  cbind(data_bets,tempdata)
 }
-colnames(data) <- nomes[1:ncol(data)]
-
-data <- window(data, start=c(2002,1), end= c(2017,12))
+colnames(data_bets) <- nomes
+data_bets <- window(data_bets, start=c(2002,1), end= c(2017,12))
+data_bets <- tk_tbl(data_bets)
 
 #Definindo as variáveis
-selic <- data[,1]
-cambio <- data[,3]
-vcambio <- diff(cambio)
-vcambio2 <- diff(log(cambio))
+data_bets %>% select(index,`SELIC Acumulada Anualizada`) -> selic
+data_bets %>% select(index,`Taxa de câmbio - Livre - Dólar americano (venda)`) -> cambio
+vcambio <- diff(tk_xts(cambio,silent = T))
+vcambio2 <- diff(log(tk_xts(cambio,silent = T)))
+vcambio <- na.omit(vcambio)
+vcambio2 <- na.omit(vcambio2)
+vcambio2 <- tk_tbl(vcambio2)
+cambio %>% 
+  mutate(taxa_de_cambio = log(`Taxa de câmbio - Livre - Dólar americano (venda)`)) %>% 
+  select(index,taxa_de_cambio) -> cambiol
 #calculando o hiato do produto
-prodind <- ts(data[,2], start = 2002, frequency = 12)
+prodind <- ts(data_bets$`Indicador de Produção Geral`, start = 2002, frequency = 12)
 saz <- seas(x = prodind)
 prodinddsaz <- saz$series$s11
 prodindhp <- hpfilter(prodinddsaz,freq=14400,type=c("lambda"),drift=FALSE)
 prodindtrend <- prodindhp$trend
-hiato <- ((prodind - prodindtrend)/prodindtrend)*100
-hiato <- log(prodind)-log(prodindtrend)
-
+hiato <- (log(prodinddsaz)-log(prodindtrend))*100
+hiato <- tk_tbl(hiato)
 ####### Dados de Inflação
 indic <- c("IPCA","IGP-DI")
 end_date <- "2018-06-31"
@@ -73,9 +110,9 @@ ipca <- infla %>% select(indic,date,reference_year,mean) %>%
   ungroup() %>%
   mutate(date = as.yearmon(paste0(`year(date)`,"-", `month(date)`))) %>%
   select(date,reference_year,media) %>%
-  dplyr::rename(Datas = date,Ano_referencia=reference_year,Media = media)%>%
-  group_by(Datas) %>%
-  filter(Ano_referencia %in% c(year(Datas),year(Datas)+1))
+  dplyr::rename(Data = date,Ano_referencia=reference_year,Media = media)%>%
+  group_by(Data) %>%
+  filter(Ano_referencia %in% c(year(Data),year(Data)+1))
 
 igpmdi <- infla %>% select(indic,date,reference_year,mean) %>%
   filter(indic == "IGP-DI") %>%
@@ -84,9 +121,9 @@ igpmdi <- infla %>% select(indic,date,reference_year,mean) %>%
   ungroup() %>%
   mutate(date = as.yearmon(paste0(`year(date)`,"-", `month(date)`))) %>%
   select(date,reference_year,media) %>%
-  dplyr::rename(Datas = date,Ano_referencia=reference_year,Media = media)%>%
-  group_by(Datas) %>%
-  filter(Ano_referencia %in% c(year(Datas),year(Datas)+1))
+  dplyr::rename(Data = date,Ano_referencia=reference_year,Media = media)%>%
+  group_by(Data) %>%
+  filter(Ano_referencia %in% c(year(Data),year(Data)+1))
 
 metas <- read.csv("Metas.csv")
 metas <- metas %>% select(-X)
@@ -95,57 +132,66 @@ datas <- seq(as.Date("2002-01-01"),as.Date("2017-12-01"), by = "month")
 datas <- as.yearmon(datas)
 metas$key <- datas
 colnames(metas) <- c("Data","Meta")
+metas <- tk_tbl(metas)
 
-#calculo do desvio da meta
-desviott <- data.frame(1:12,0)
-metas <- read.csv("Metas.csv", header = T, stringsAsFactors = F)[,-1]
-for(i in 2002:2016){
-  desviott[,1] <- eval(as.symbol(paste0("mediam",i)))[,1] - metas[,paste0("X",i)]
-  desviott[,2] <- eval(as.symbol(paste0("mediam",i)))[,2] - metas[,paste0("X",i+1)]
-  assign(paste0("desviom",i),desviott)
-}
+#calculo do desvio da meta v
+ipca <- inner_join(ipca,metas, by="Data")
+igpmdi <- inner_join(igpmdi,metas, by="Data")
 
-#variavel DT
+ipca %>%
+  mutate(Desvio = Media - Meta) -> ipca
+
+igpmdi %>%
+  mutate(Desvio = Media - Meta) -> igpmdi
+
 Dt <- as.data.frame(0)
-for(i in 2002:2016){
-  for(j in 1:12){
-    Dt[j,1] <- eval(as.symbol(paste0("desviom",i)))[j,1]*((12-j)/12) + eval(as.symbol(paste0("desviom",i)))[j,2]*(j/12)
-    assign(paste0("Dt",i),Dt)
+for(j in 2002:2017){
+  ipca %>% 
+    filter(year(Data) == j) -> data 
+  for(i in 1:12){
+    data %>% filter(Ano_referencia == j) -> aux1
+    data %>% filter(Ano_referencia == j+1) -> aux2
+    aux3 <- as.data.frame(0)
+    aux3[,1] <- (aux1$Desvio[i]*((12-i)/12))+(aux2$Desvio[i]*(i/12))
+    Dt <- rbind(Dt,aux3)
   }
 }
+Dt <- Dt[-which(Dt == 0),]
+Dt <- xts::as.xts(Dt, order.by = unique(ipca$Data))
+colnames(Dt) <- "Desvio_das_Expectativas"
+Dt <- tk_tbl(Dt)
 
-Dt <- rbind.data.frame(Dt2002,Dt2003,Dt2004,Dt2005,Dt2006,Dt2007,Dt2008,Dt2009,Dt2010,Dt2011,
-                       Dt2012,Dt2013,Dt2014,Dt2015,Dt2016)
-Dt <- ts(Dt, start = 2002, frequency = 12)
 
-rm(list=c("Desvio2002","Desvio2003","Desvio2004","Desvio2005","Desvio2006", "Desvio2007",  "Desvio2008", 
-          "Desvio2009", "Desvio2010","Desvio2011","Desvio2012", "Desvio2013","Desvio2014","Desvio2015",
-          "Desvio2016", "mediam2002","mediam2003","mediam2004", 
-          "mediam2005", "mediam2006",  "mediam2007", "mediam2008",  "mediam2009",  
-          "mediam2010","mediam2011","mediam2012","mediam2013","mediam2014","mediam2015",
-          "mediam2016","mdtt","tempdata","desviott","desviom2002","desviom2003","desviom2004",
-          "desviom2005","desviom2006","desviom2007", "desviom2008", "desviom2009", "desviom2010",
-          "desviom2011","desviom2012", "desviom2013", "desviom2014", "desviom2015", "desviom2016",
-          "Dt2002","Dt2003","Dt2004","Dt2005","Dt2006","Dt2007","Dt2008","Dt2009","Dt2010","Dt2011",
-          "Dt2012","Dt2013","Dt2014","Dt2015","Dt2016"))
+variaveis1 <- inner_join(selic,hiato)
+variaveis1 <- inner_join(variaveis1,cambiol)
+variaveis1 <- inner_join(variaveis1,Dt)
+variaveis1 <- ts(variaveis1[,2:ncol(variaveis1)], start = c(2002,1), frequency = 12)
+variaveis1d <- diff(variaveis1)
 
-####unindo variáveis####
-variaveis1 <- cbind(selic,vcambio,hiato,Dt)
-variaveis1 <- window(variaveis1, start = c(2002,2), end = c(2016,12))
-variaveis2 <- cbind(diff(selic), vcambio, diff(hiato), diff(Dt))
-variaveis3 <- cbind(selic,cambio,hiato,Dt)
-############# Variaveis Variação percentual
-dpselic <- (selic/lag(selic,-1) - 1)*100 
-dpcambio <- (cambio/lag(cambio,-1) - 1)*100
-dphiato <- (hiato/lag(hiato,-1) - 1)*100
-dplDt <- (Dt/lag(Dt,-1) - 1)*100
-variaveis4 <- cbind(dpselic,dpcambio,dphiato,dplDt)
+variaveis2 <- inner_join(selic,hiato)
+variaveis2 <- inner_join(variaveis2,Dt)
+variaveis2 <- inner_join(variaveis2,cambiol)
+variaveis2 <- inner_join(variaveis2,volatilidade_implicita)
+variaveis2 <- ts(variaveis2[,2:ncol(variaveis2)], start = c(2003,10), frequency = 12)
+variaveis2d <- diff(variaveis2)
+
+variaveis3 <- inner_join(selic,hiato)
+variaveis3 <- inner_join(variaveis3,Dt)
+variaveis3 <- inner_join(variaveis3,cambiol)
+variaveis3 <- inner_join(variaveis3,CDS_Brazil)
+variaveis3 <- inner_join(variaveis3,volatilidade_historica)
+variaveis3 <- ts(variaveis3[,2:ncol(variaveis3)], start = c(2002,1), frequency = 12)
+variaveis3d <- diff(variaveis3)
+
 #### estimando o modelo
 set.seed(300)
-bv1 <- bvar.sv.tvp(variaveis1, p = 2, nf = 2, tau = 40)
-bv3 <- bvar.sv.tvp(variaveis2, p = 2, nf = 2, tau = 40)
-bv4 <- bvar.sv.tvp(variaveis1, p = 2, nf = 2, tau = 36)
-bv5 <- bvar.sv.tvp(variaveis3, p = 2, nf = 2, tau = 40)
+bv1 <- bvar.sv.tvp(variaveis1, p = 2, nf = 2, tau = 48)
+bv1d <- bvar.sv.tvp(variaveis1d, p = 2, nf = 2, tau = 48)
+bv2 <- bvar.sv.tvp(variaveis2, p = 2, nf = 1, tau = 36)
+bv2d <- bvar.sv.tvp(variaveis2d, p = 2, nf = 1, tau = 36)
+bv3 <- bvar.sv.tvp(variaveis3, p = 2, nf = 2, tau = 48)
+bv3d <- bvar.sv.tvp(variaveis3d, p = 2, nf = 2, tau = 48)
+#bv5 <- bvar.sv.tvp(variaveis3, p = 2, nf = 2, tau = 40)
 ################################################
 ################Plotando Gráficos######
 matplot2 <- function(x, y, ylim, ...){
@@ -160,16 +206,18 @@ abline2 <- function(...){
   abline(..., lty = 4, lwd = 0.3)
 }
 
-tml <- paste0(floor(time(variaveis3)), "M", (1 + round(12*(time(variaveis3) - floor(time(variaveis3))))))
+tml <- paste0(year(floor(time(as.xts(metas$Meta,order.by = metas$Data)))), 
+              "M", 
+              (1 + round(12*(time(as.xts(metas$Meta,order.by = metas$Data)) - floor(time(as.xts(metas$Meta,order.by = metas$Data)))))))
 # Reação considerando os Presidentes do BACEN
-all_dts <- c("2006M1","2011M1")
+all_dts <- c("2011M1","2016M7")
 for (rr in 1:4){
   tmp <- list()
   for (dd in all_dts){
-    t <- which(tml == dd) -42
+    t <- which(tml == dd) -40
     t_ind <- which(all_dts == dd)
     # Compute impulse responses
-    aux <- impulse.responses(bv1, impulse.variable = rr,
+    aux <- impulse.responses(bv2, impulse.variable = rr,
                              response.variable = 1, t = t,
                              scenario = 3,
                              draw.plot = FALSE, nhor = 40)$irf
@@ -179,11 +227,11 @@ for (rr in 1:4){
   gdat <- rbind(0, sapply(tmp, function(z) apply(as.matrix(z), 2, median)))
   # Configure and print plot
   if (rr == 1){
-    yb <- c(-0.02, 0.5)
+    yb <- c(-0.01, 0.4)
   } else if (rr == 2){
-    yb <- c(-0.08, 0.01)
+    yb <- c(-0.01, 0.55)
   } else if (rr == 3){
-    yb <- c(-0.01, 0.25)
+    yb <- c(-0.05, 0.15)
   } else{
     yb <- c(-0.01, 0.25)
   }
@@ -208,14 +256,14 @@ for (rr in 1:4){
   legend(legend_loc, legend = all_dts, col = cols1, lty = 1, lwd = 2, bty = "n") 
 }
 # Reação dos Desvios das Expectativas Presidentes do BACEN ##################
-all_dts <- c("2006M1","2011M1")
+all_dts <- c("2007M1","2016M7")
 for (rr in 1:4){
   tmp <- list()
   for (dd in all_dts){
     t <- which(tml == dd) -42
     t_ind <- which(all_dts == dd)
     # Compute impulse responses
-    aux <- impulse.responses(bv1, impulse.variable = rr,
+    aux <- impulse.responses(bv2, impulse.variable = rr,
                              response.variable = 4, t = t,
                              scenario = 3,
                              draw.plot = FALSE, nhor = 40)$irf
